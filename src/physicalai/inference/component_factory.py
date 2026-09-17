@@ -14,13 +14,16 @@ to an object instance, supporting both ``type`` + flat params and
 from __future__ import annotations
 
 import os
+from argparse import ArgumentError
 from pathlib import Path
-from typing import TYPE_CHECKING
+
+from jsonargparse import ArgumentParser
+
+from physicalai.config import Config
+from physicalai.config.base import parse_class_config
 
 from ._importing import import_dotted_path
-
-if TYPE_CHECKING:
-    from physicalai.inference.manifest import ComponentSpec
+from .manifest import ComponentSpec
 
 
 class ComponentRegistry:
@@ -107,10 +110,15 @@ component_registry.register("new_line", "physicalai.inference.preprocessors.NewL
 component_registry.register("hf_tokenizer", "physicalai.inference.preprocessors.HFTokenizer")
 component_registry.register("ov_tokenizer", "physicalai.inference.preprocessors.OVTokenizer")
 component_registry.register("pi05", "physicalai.inference.preprocessors.Pi05Preprocessor")
+component_registry.register("xr0", "physicalai.inference.preprocessors.XR0Preprocessor")
+component_registry.register("rldx1", "physicalai.inference.preprocessors.Rldx1Preprocessor")
+component_registry.register("rldx1_token_composer", "physicalai.inference.preprocessors.Rldx1TokenComposer")
+component_registry.register("rldx1_rope", "physicalai.inference.preprocessors.Rldx1RopePreprocessor")
 component_registry.register("to_float_tensor", "physicalai.inference.preprocessors.ToFloatTensorPreprocessor")
 
 # Postprocessors
 component_registry.register("denormalize", "physicalai.inference.postprocessors.StatsDenormalizer")
+component_registry.register("xr0_denormalize", "physicalai.inference.postprocessors.XR0Postprocessor")
 component_registry.register("action_chunk_trimmer", "physicalai.inference.postprocessors.ActionChunkTrimmer")
 
 
@@ -174,13 +182,9 @@ def _import_class(class_path: str) -> type:
     return obj
 
 
-# Maximum nesting depth for recursive component instantiation.  Unbounded
-# recursion on a crafted manifest would exhaust the Python call stack.
-_MAX_COMPONENT_DEPTH = 10
-
-
 def instantiate_component(
-    spec: ComponentSpec,
+    base: type | ComponentSpec,
+    spec: ComponentSpec | None = None,
     *,
     registry: ComponentRegistry | None = None,
 ) -> object:
@@ -197,73 +201,65 @@ def instantiate_component(
 
     ``class_path`` takes precedence when both are present.
 
-    Nested ``ComponentSpec`` dicts in ``init_args`` are instantiated
-    recursively.
+    Nested typed component values are instantiated by jsonargparse according
+    to the resolved class constructor annotations.
 
     Args:
+        base: Expected component base type, or a component spec for the
+            deprecated one-argument compatibility form.
         spec: Component descriptor with type or class_path.
         registry: Optional registry for short-name resolution.
             Defaults to :data:`component_registry`.
 
     Returns:
         An instance of the resolved class.
-    """
-    return _instantiate_component(spec, registry=registry, _depth=0)
-
-
-def _instantiate_component(
-    spec: ComponentSpec,
-    *,
-    registry: ComponentRegistry | None = None,
-    _depth: int = 0,
-) -> object:
-    """Recursive implementation of :func:`instantiate_component`. Do not call directly.
-
-    Returns:
-        An instance of the resolved class.
 
     Raises:
-        ValueError: If the component nesting depth exceeds :data:`_MAX_COMPONENT_DEPTH`.
+        TypeError: If the resolved recipe does not describe a class recipe.
     """
-    if _depth >= _MAX_COMPONENT_DEPTH:
-        msg = (
-            f"Component nesting depth {_depth} exceeds the maximum allowed "
-            f"({_MAX_COMPONENT_DEPTH}). Check the manifest for deeply or "
-            "cyclically nested component specs."
-        )
-        raise ValueError(msg)
-
+    if spec is None:
+        spec = base
+        if not isinstance(spec, ComponentSpec):
+            msg = "instantiate_component requires a component spec"
+            raise TypeError(msg)
+        base = _import_class(component_registry.resolve(spec.class_path or spec.type))
     reg = registry or component_registry
+    canonical = _canonical_spec(spec, registry=reg)
+    class_path = canonical["class_path"]
+    init_args = canonical["init_args"]
+    if not isinstance(class_path, str) or not isinstance(init_args, dict):
+        msg = "Resolved component spec is not a valid class recipe"
+        raise TypeError(msg)
+    target = _import_class(class_path)
+    try:
+        # ``add_subclass_arguments`` expects an actual base class with
+        # selectable subclasses.  Feature descriptors are concrete dataclasses,
+        # so use the regular typed-class parser when the recipe names the
+        # expected class itself.
+        if target is base:
+            return parse_class_config(base, init_args)
 
+        parser = ArgumentParser(exit_on_error=False)
+        parser.add_subclass_arguments(base, "component", required=True)
+        namespace = parser.parse_object(
+            {"component": {"class_path": class_path, "init_args": init_args}},
+            defaults=False,
+        )
+        return parser.instantiate(namespace).component
+    except (ArgumentError, ValueError) as exc:
+        raise TypeError(str(exc)) from exc
+
+
+def _canonical_spec(spec: ComponentSpec, *, registry: ComponentRegistry) -> dict[str, object]:
+    """Resolve aliases and normalize a manifest component to constructor args.
+
+    Returns:
+        A canonical ``class_path`` and ``init_args`` mapping.
+    """
     if spec.class_path:
-        resolved_path = reg.resolve(spec.class_path)
-        cls_obj = _import_class(resolved_path)
-
-        resolved_args: dict[str, object] = {}
-        for key, value in spec.init_args.items():
-            if isinstance(value, dict) and ("class_path" in value or "type" in value):
-                resolved_args[key] = _instantiate_component(
-                    type(spec).model_validate(value),
-                    registry=reg,
-                    _depth=_depth + 1,
-                )
-            else:
-                resolved_args[key] = value
-
-        return cls_obj(**resolved_args)
-
-    resolved_path = reg.resolve(spec.type)
-    cls_obj = _import_class(resolved_path)
-
-    resolved_params: dict[str, object] = {}
-    for key, value in spec.flat_params.items():
-        if isinstance(value, dict) and ("class_path" in value or "type" in value):
-            resolved_params[key] = _instantiate_component(
-                type(spec).model_validate(value),
-                registry=reg,
-                _depth=_depth + 1,
-            )
-        else:
-            resolved_params[key] = value
-
-    return cls_obj(**resolved_params)
+        class_path = registry.resolve(spec.class_path)
+        init_args = spec.init_args
+    else:
+        class_path = registry.resolve(spec.type)
+        init_args = spec.flat_params
+    return Config(class_path, init_args).to_dict()
