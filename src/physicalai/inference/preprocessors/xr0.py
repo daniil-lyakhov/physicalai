@@ -48,12 +48,21 @@ _TASK_TEMPLATE = "Generate robot actions for the task:\n{instruction} /no_cot"
 _ASSISTANT_PRIMER = "<cot></cot>"
 
 # View titles the model was trained with, e.g.
-# "wrist_left" -> "Left-Wrist" so the prompt reads "# Left-Wrist View".
+# "wrist_left" -> "Left-Wrist" so the prompt reads "# Left-Wrist View". The
+# " View" suffix is appended by the prompt renderer, so the titles stored here
+# deliberately omit it.
 _VIEW_TITLES = {
+    "ego": "Ego",
     "base": "Base",
     "wrist_left": "Left-Wrist",
     "wrist_right": "Right-Wrist",
 }
+
+# Canonical prompt order of the XR0 view names. The order is fixed by the
+# reference data format rather than by the mapping's insertion order, so an
+# ``image_key_view_map`` round-tripped through the JSON manifest still yields
+# the prompt section order the model was trained with.
+_VIEW_ORDER = ("ego", "base", "wrist_left", "wrist_right")
 
 # Qwen3-VL chat special tokens rendered as literal text (a bare tokenizer maps
 # each to its dedicated special-token id).
@@ -252,6 +261,13 @@ class XR0Preprocessor(Preprocessor):
             off-graph patchify duplicates a still image to this many frames).
         normalize_state: Whether the exported model expects normalized state.
             Defaults to False (raw state), matching the training default.
+        image_key_view_map: Baked mapping from observation image key to canonical
+            XR0 view name (``"ego"``, ``"base"``, ``"wrist_left"`` or
+            ``"wrist_right"``). Keys may be given as bare camera names or with
+            the ``images.`` prefix. When set, the mapping must cover the
+            observation's image keys exactly and the prompt's view sections are
+            renamed and emitted in the canonical order. Defaults to ``None``,
+            which keeps the observation's own key names and order.
         state_mean: Baked per-timestep state mean with shape
             ``(state_len, max_state_dim)`` (identity when normalization is
             disabled). The XR0 graph consumes a single state frame, so
@@ -277,14 +293,16 @@ class XR0Preprocessor(Preprocessor):
         temporal_patch_size: int = _QWEN3VL_TEMPORAL_PATCH_SIZE,
         *,
         normalize_state: bool = False,
+        image_key_view_map: dict[str, str] | None = None,
         state_mean: Sequence[Sequence[float]] | None = None,
         state_std: Sequence[Sequence[float]] | None = None,
     ) -> None:
         """Initialize the XR0 inference preprocessor.
 
         Raises:
-            ValueError: If ``patch_size`` / ``merge_size`` is not positive, or
-                if the state stats are not a single-timestep 2-D array.
+            ValueError: If ``patch_size`` / ``merge_size`` is not positive, if
+                ``image_key_view_map`` carries an unknown or duplicated view
+                name, or if the state stats are not a single-timestep 2-D array.
         """
         super().__init__()
         if int(patch_size) <= 0 or int(merge_size) <= 0:
@@ -301,6 +319,7 @@ class XR0Preprocessor(Preprocessor):
         self._merge_size = int(merge_size)
         self._temporal_patch_size = int(temporal_patch_size)
         self._normalize_state = bool(normalize_state)
+        self._image_key_view_map = self._normalize_view_map(image_key_view_map)
 
         # State normalization is opt-in; padded dims use identity stats (mean 0,
         # std 1) so they stay zero, mirroring the training preprocessor.
@@ -338,12 +357,73 @@ class XR0Preprocessor(Preprocessor):
         out[:dim] = arr[:dim]
         return out
 
+    @staticmethod
+    def _normalize_view_map(image_key_view_map: dict[str, str] | None) -> dict[str, str]:
+        """Prefix-qualify and validate a dataset-key to canonical-view mapping.
+
+        Keys are accepted as bare camera names, with the runtime ``images.``
+        prefix, or with the training-side ``observation.images.`` prefix, and are
+        returned in the runtime's canonical ``images.<camera>`` form so they can
+        be compared directly against the observation's image keys.
+
+        Returns:
+            The validated mapping, keyed by canonical image key.
+
+        Raises:
+            ValueError: If a value is not a canonical XR0 view name, or if two
+                keys map onto the same view.
+        """
+        mapping: dict[str, str] = {}
+        for raw_key, view in (image_key_view_map or {}).items():
+            camera = raw_key.removeprefix("observation.").removeprefix(f"{IMAGES}.")
+            mapping[f"{IMAGES}.{camera}"] = view
+
+        unknown = sorted({view for view in mapping.values() if view not in _VIEW_TITLES})
+        if unknown:
+            msg = f"image_key_view_map values must be canonical XR0 view names {list(_VIEW_ORDER)}, got {unknown}."
+            raise ValueError(msg)
+
+        views = list(mapping.values())
+        if len(set(views)) != len(views):
+            duplicates = sorted({view for view in views if views.count(view) > 1})
+            msg = f"image_key_view_map values must be unique, got duplicates {duplicates}."
+            raise ValueError(msg)
+
+        return mapping
+
+    def _resolve_views(self, image_keys: list[str]) -> tuple[list[str], list[str]]:
+        """Map the observation image keys onto canonical view names, in canonical order.
+
+        Returns:
+            An ``(image_keys, views)`` tuple, both ordered by ``_VIEW_ORDER`` when
+            ``image_key_view_map`` is set and left in the observation's own key
+            order otherwise.
+
+        Raises:
+            ValueError: If ``image_key_view_map`` is set and its keys do not match
+                the observation image keys exactly.
+        """
+        if not self._image_key_view_map:
+            return image_keys, [key.removeprefix(f"{IMAGES}.") for key in image_keys]
+
+        if set(self._image_key_view_map) != set(image_keys):
+            msg = (
+                "image_key_view_map keys must match the observation image keys exactly. "
+                f"Expected {sorted(self._image_key_view_map)}, got {sorted(image_keys)}."
+            )
+            raise ValueError(msg)
+
+        ordered_keys = sorted(image_keys, key=lambda key: _VIEW_ORDER.index(self._image_key_view_map[key]))
+        return ordered_keys, [self._image_key_view_map[key] for key in ordered_keys]
+
     def _extract_images(self, inputs: dict[str, object]) -> tuple[list[str], list[np.ndarray]]:
         """Return the ordered view names and resized ``(H, W, C)`` uint8 views.
 
-        The view order is taken directly from the observation image keys
-        (``images.<view>``) in their natural insertion order, so ``pixel_values``
-        stays aligned with the per-view prompt sections (title + pad count).
+        Without an ``image_key_view_map`` the view order is taken directly from
+        the observation image keys (``images.<view>``) in their natural insertion
+        order; with one, the views are renamed and reordered canonically. Either
+        way ``pixel_values`` stays aligned with the per-view prompt sections
+        (title + pad count).
 
         Returns:
             A ``(views, images)`` tuple: the ordered view names and the resized
@@ -364,10 +444,14 @@ class XR0Preprocessor(Preprocessor):
         if not image_items:
             msg = "XR0 inference requires at least one image observation"
             raise ValueError(msg)
-        views = [key.removeprefix(f"{IMAGES}.") for key in image_items]
+        image_keys, views = self._resolve_views(list(image_items))
         images = [
-            _resize_image(_to_rgb_frame(value), factor=self._image_factor, max_pixels=self._image_max_pixels)
-            for value in image_items.values()
+            _resize_image(
+                _to_rgb_frame(image_items[key]),
+                factor=self._image_factor,
+                max_pixels=self._image_max_pixels,
+            )
+            for key in image_keys
         ]
         return views, images
 

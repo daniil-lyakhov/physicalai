@@ -296,6 +296,24 @@ class TestInstantiateComponent:
         postprocessor = instantiate_component(Postprocessor, post_spec)
         assert postprocessor._mean.shape == (5, 8)
 
+    def test_instantiate_xr0_with_image_key_view_map(self) -> None:
+        """XR0 exports bake the camera renaming as a JSON object; jsonargparse
+        must accept it as a ``dict[str, str]`` constructor argument."""
+        from physicalai.inference.preprocessors.base import Preprocessor
+
+        spec = ComponentSpec.model_validate({
+            "type": "xr0",
+            "max_state_dim": 32,
+            "patch_size": 16,
+            "merge_size": 2,
+            "image_key_view_map": {"top_camera": "ego", "pov_black_follower_camera": "wrist_left"},
+        })
+        preprocessor = instantiate_component(Preprocessor, spec)
+        assert preprocessor._image_key_view_map == {
+            "images.top_camera": "ego",
+            "images.pov_black_follower_camera": "wrist_left",
+        }
+
 
 class TestModelSpec:
     def test_defaults(self) -> None:
