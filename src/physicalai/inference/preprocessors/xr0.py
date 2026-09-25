@@ -36,6 +36,8 @@ _TEMPORAL_IMAGE_NDIM = 5
 _BATCHED_IMAGE_NDIM = 4
 _CHANNELS_FIRST_NDIM = 3
 _TEMPORAL_STATE_NDIM = 3
+# Baked state stats are always per-timestep: (state_len, max_state_dim).
+_STATS_NDIM = 2
 
 # Reject images whose aspect ratio exceeds this (matches the source preprocessor).
 _MAX_ASPECT_RATIO = 200
@@ -250,8 +252,11 @@ class XR0Preprocessor(Preprocessor):
             off-graph patchify duplicates a still image to this many frames).
         normalize_state: Whether the exported model expects normalized state.
             Defaults to False (raw state), matching the training default.
-        state_mean: Baked ``max_state_dim`` state mean (identity when disabled).
-        state_std: Baked ``max_state_dim`` state std (identity when disabled).
+        state_mean: Baked per-timestep state mean with shape
+            ``(state_len, max_state_dim)`` (identity when normalization is
+            disabled). The XR0 graph consumes a single state frame, so
+            ``state_len`` must be 1.
+        state_std: Baked state std, same shape as ``state_mean``.
 
     Examples:
         Constructed via manifest (type-based resolution)::
@@ -272,13 +277,14 @@ class XR0Preprocessor(Preprocessor):
         temporal_patch_size: int = _QWEN3VL_TEMPORAL_PATCH_SIZE,
         *,
         normalize_state: bool = False,
-        state_mean: Sequence[float] | None = None,
-        state_std: Sequence[float] | None = None,
+        state_mean: Sequence[Sequence[float]] | None = None,
+        state_std: Sequence[Sequence[float]] | None = None,
     ) -> None:
         """Initialize the XR0 inference preprocessor.
 
         Raises:
-            ValueError: If ``patch_size`` / ``merge_size`` is not positive.
+            ValueError: If ``patch_size`` / ``merge_size`` is not positive, or
+                if the state stats are not a single-timestep 2-D array.
         """
         super().__init__()
         if int(patch_size) <= 0 or int(merge_size) <= 0:
@@ -305,13 +311,28 @@ class XR0Preprocessor(Preprocessor):
             self._state_mean = np.zeros(self._max_state_dim, dtype=np.float32)
             self._state_std = np.ones(self._max_state_dim, dtype=np.float32)
 
-    def _pad_state_stat(self, values: Sequence[float], fill: float) -> np.ndarray:
+    def _pad_state_stat(self, values: Sequence[Sequence[float]], fill: float) -> np.ndarray:
         """Pad/truncate a state stat to ``max_state_dim`` (padded dims use ``fill``).
+
+        Expects the per-timestep ``(state_len, max_state_dim)`` buffer the
+        trainer bakes into the manifest. Only the current state frame is
+        normalized (see :meth:`_prepare_state`), so exactly one row is allowed
+        and it is flattened into the returned stat vector.
 
         Returns:
             The ``(max_state_dim,)`` float32 stat array.
+
+        Raises:
+            ValueError: If the stat is not 2-D or carries more than one timestep.
         """
-        arr = np.asarray(values, dtype=np.float32).flatten()
+        arr = np.asarray(values, dtype=np.float32)
+        if arr.ndim != _STATS_NDIM or arr.shape[0] != 1:
+            msg = (
+                "state stats must be per-timestep with shape (1, max_state_dim), "
+                f"got {arr.shape}; the XR0 graph consumes a single state frame"
+            )
+            raise ValueError(msg)
+        arr = arr.reshape(-1)
         out = np.full(self._max_state_dim, fill, dtype=np.float32)
         dim = min(self._max_state_dim, arr.shape[0])
         out[:dim] = arr[:dim]
