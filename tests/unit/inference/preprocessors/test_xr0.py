@@ -124,8 +124,8 @@ class TestXR0PreprocessorState:
             patch_size=16,
             merge_size=2,
             normalize_state=True,
-            state_mean=[1.0] * 8,
-            state_std=[2.0] * 8,
+            state_mean=[[1.0] * 8],
+            state_std=[[2.0] * 8],
         )
         inputs = _make_inputs(state_dim=8)
         inputs[STATE] = np.ones(8, dtype=np.float32) * 3.0
@@ -343,13 +343,37 @@ class TestPrepareState:
             patch_size=16,
             merge_size=2,
             normalize_state=True,
-            state_mean=[1.0, 1.0],
-            state_std=[2.0, 2.0],
+            state_mean=[[1.0, 1.0]],
+            state_std=[[2.0, 2.0]],
         )
         result = prep._prepare_state({STATE: state})
         assert result.shape == expected.shape
         assert result.dtype == np.float32
         np.testing.assert_allclose(result, expected, atol=1e-5)
+
+    def test_flat_state_stats_raise(self) -> None:
+        # Per-dimension stats without the timestep axis are no longer accepted.
+        with pytest.raises(ValueError, match="per-timestep"):
+            XR0Preprocessor(
+                max_state_dim=4,
+                patch_size=16,
+                merge_size=2,
+                normalize_state=True,
+                state_mean=[1.0, 1.0],
+                state_std=[2.0, 2.0],
+            )
+
+    def test_multi_timestep_state_stats_raise(self) -> None:
+        # More than one row is ambiguous: only the current frame is normalized.
+        with pytest.raises(ValueError, match="per-timestep"):
+            XR0Preprocessor(
+                max_state_dim=4,
+                patch_size=16,
+                merge_size=2,
+                normalize_state=True,
+                state_mean=[[1.0, 1.0], [2.0, 2.0]],
+                state_std=[[2.0, 2.0], [3.0, 3.0]],
+            )
 
     def test_missing_state_raises(self, small_preprocessor) -> None:
         with pytest.raises(ValueError, match="requires a 'state'"):
