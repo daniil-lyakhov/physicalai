@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from typing import cast
+
 import numpy as np
 import pytest
 
@@ -234,7 +237,7 @@ class TestXR0PreprocessorViewMap:
         # The map is declared in dataset order, but the prompt must follow the
         # canonical order the pretrained checkpoint was trained with.
         prep = self._prep(
-            image_key_view_map={"pov_black_follower_camera": "wrist_left", "top_camera": "ego"},
+            image_key_view_map={"images.pov_black_follower_camera": "wrist_left", "images.top_camera": "ego"},
         )
         views, images = prep._extract_images(self._inputs())
         assert views == ["ego", "wrist_left"]
@@ -245,16 +248,21 @@ class TestXR0PreprocessorViewMap:
     def test_prompt_matches_pretrain_reference(self) -> None:
         # Byte-for-byte parity with the reference prompt of the base Pretrain
         # checkpoint (xr0/docs/data_format.md, mibot/server/runtime/client.py).
-        prep = self._prep(image_key_view_map={"top_camera": "ego", "pov_black_follower_camera": "wrist_left"})
+        prep = self._prep(
+            image_key_view_map={"images.top_camera": "ego", "images.pov_black_follower_camera": "wrist_left"},
+        )
         inputs = self._inputs()
         inputs[STATE] = np.zeros((8,), dtype=np.float32)
-        prompt = prep(inputs)[TASK][0]
+        task = prep(inputs)[TASK]
+        assert isinstance(task, list)
+        prompt = task[0]
+        assert isinstance(prompt, str)
         assert "# Ego View" in prompt
         assert prompt.index("# Ego View") < prompt.index("# Left-Wrist View")
 
     def test_three_views_match_reference_order(self) -> None:
         prep = self._prep(
-            image_key_view_map={"cam_a": "wrist_right", "cam_b": "ego", "cam_c": "wrist_left"},
+            image_key_view_map={"images.cam_a": "wrist_right", "images.cam_b": "ego", "images.cam_c": "wrist_left"},
         )
         inputs: dict[str, object] = {
             IMAGES: {name: np.zeros((256, 256, 3), dtype=np.uint8) for name in ("cam_a", "cam_b", "cam_c")},
@@ -262,32 +270,22 @@ class TestXR0PreprocessorViewMap:
         views, _ = prep._extract_images(inputs)
         assert views == ["ego", "wrist_left", "wrist_right"]
 
-    def test_accepts_prefixed_keys(self) -> None:
-        prep = self._prep(
-            image_key_view_map={
-                "observation.images.top_camera": "ego",
-                f"{IMAGES}.pov_black_follower_camera": "wrist_left",
-            },
-        )
-        views, _ = prep._extract_images(self._inputs())
-        assert views == ["ego", "wrist_left"]
-
     def test_empty_map_keeps_observation_names(self) -> None:
         views, _ = self._prep()._extract_images(self._inputs())
         assert views == ["pov_black_follower_camera", "top_camera"]
 
     def test_key_mismatch_raises(self) -> None:
-        prep = self._prep(image_key_view_map={"top_camera": "ego"})
+        prep = self._prep(image_key_view_map={"images.top_camera": "ego"})
         with pytest.raises(ValueError, match="must match the observation image keys exactly"):
             prep._extract_images(self._inputs())
 
     def test_unknown_view_name_raises(self) -> None:
         with pytest.raises(ValueError, match="canonical XR0 view names"):
-            self._prep(image_key_view_map={"top_camera": "front_cam"})
+            self._prep(image_key_view_map={"images.top_camera": "front_cam"})
 
     def test_duplicate_view_name_raises(self) -> None:
         with pytest.raises(ValueError, match="must be unique"):
-            self._prep(image_key_view_map={"top_camera": "ego", "pov_black_follower_camera": "ego"})
+            self._prep(image_key_view_map={"images.top_camera": "ego", "images.pov_black_follower_camera": "ego"})
 
 
 class TestBuildPixelGrid:
@@ -367,6 +365,19 @@ class TestPrepareState:
         # Small max_state_dim keeps the reference tensors tiny.
         return XR0Preprocessor(max_state_dim=4, patch_size=16, merge_size=2)
 
+    def test_pad_state_stat(self, small_preprocessor) -> None:
+        padded = small_preprocessor._pad_state_stat([[2.0, 3.0]], fill=1.0)
+        np.testing.assert_array_equal(padded, np.array([2.0, 3.0, 1.0, 1.0], dtype=np.float32))
+        assert padded.dtype == np.float32
+
+        truncated = small_preprocessor._pad_state_stat([[2.0, 3.0, 4.0, 5.0, 6.0]], fill=0.0)
+        np.testing.assert_array_equal(truncated, np.array([2.0, 3.0, 4.0, 5.0], dtype=np.float32))
+
+    @pytest.mark.parametrize("values", [[1.0, 2.0], [[1.0], [2.0]], [[[1.0]]]])
+    def test_pad_state_stat_rejects_invalid_shape(self, small_preprocessor, values) -> None:
+        with pytest.raises(ValueError, match="state stats must be per-timestep with shape"):
+            small_preprocessor._pad_state_stat(values, fill=0.0)
+
     @pytest.mark.parametrize(
         ("state", "expected"),
         [
@@ -443,8 +454,8 @@ class TestPrepareState:
                 patch_size=16,
                 merge_size=2,
                 normalize_state=True,
-                state_mean=[1.0, 1.0],
-                state_std=[2.0, 2.0],
+                state_mean=cast("Sequence[Sequence[float]]", [1.0, 1.0]),
+                state_std=cast("Sequence[Sequence[float]]", [2.0, 2.0]),
             )
 
     def test_multi_timestep_state_stats_raise(self) -> None:

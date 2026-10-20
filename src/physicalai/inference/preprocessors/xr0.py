@@ -58,10 +58,7 @@ _VIEW_TITLES = {
     "wrist_right": "Right-Wrist",
 }
 
-# Canonical prompt order of the XR0 view names. The order is fixed by the
-# reference data format rather than by the mapping's insertion order, so an
-# ``image_key_view_map`` round-tripped through the JSON manifest still yields
-# the prompt section order the model was trained with.
+# Canonical prompt order of the XR0 view names.
 _VIEW_ORDER = ("ego", "base", "wrist_left", "wrist_right")
 
 # Qwen3-VL chat special tokens rendered as literal text (a bare tokenizer maps
@@ -263,11 +260,11 @@ class XR0Preprocessor(Preprocessor):
             Defaults to False (raw state), matching the training default.
         image_key_view_map: Baked mapping from observation image key to canonical
             XR0 view name (``"ego"``, ``"base"``, ``"wrist_left"`` or
-            ``"wrist_right"``). Keys may be given as bare camera names or with
-            the ``images.`` prefix. When set, the mapping must cover the
-            observation's image keys exactly and the prompt's view sections are
-            renamed and emitted in the canonical order. Defaults to ``None``,
-            which keeps the observation's own key names and order.
+            ``"wrist_right"``). Keys must be exact ``images.<camera>`` keys.
+            When set, the mapping must cover the observation's image keys
+            exactly and the prompt's view sections are renamed and emitted in
+            canonical order. Defaults to ``None``, which keeps the observation's
+            own key names and order.
         state_mean: Baked per-timestep state mean with shape
             ``(state_len, max_state_dim)`` (identity when normalization is
             disabled). The XR0 graph consumes a single state frame, so
@@ -319,7 +316,7 @@ class XR0Preprocessor(Preprocessor):
         self._merge_size = int(merge_size)
         self._temporal_patch_size = int(temporal_patch_size)
         self._normalize_state = bool(normalize_state)
-        self._image_key_view_map = self._normalize_view_map(image_key_view_map)
+        self._image_key_view_map = self._validate_view_map(image_key_view_map)
 
         # State normalization is opt-in; padded dims use identity stats (mean 0,
         # std 1) so they stay zero, mirroring the training preprocessor.
@@ -358,25 +355,17 @@ class XR0Preprocessor(Preprocessor):
         return out
 
     @staticmethod
-    def _normalize_view_map(image_key_view_map: dict[str, str] | None) -> dict[str, str]:
-        """Prefix-qualify and validate a dataset-key to canonical-view mapping.
-
-        Keys are accepted as bare camera names, with the runtime ``images.``
-        prefix, or with the training-side ``observation.images.`` prefix, and are
-        returned in the runtime's canonical ``images.<camera>`` form so they can
-        be compared directly against the observation's image keys.
+    def _validate_view_map(image_key_view_map: dict[str, str] | None) -> dict[str, str]:
+        """Validate a mapping from exact image keys to canonical views.
 
         Returns:
-            The validated mapping, keyed by canonical image key.
+            The validated mapping, keyed by image key.
 
         Raises:
             ValueError: If a value is not a canonical XR0 view name, or if two
                 keys map onto the same view.
         """
-        mapping: dict[str, str] = {}
-        for raw_key, view in (image_key_view_map or {}).items():
-            camera = raw_key.removeprefix("observation.").removeprefix(f"{IMAGES}.")
-            mapping[f"{IMAGES}.{camera}"] = view
+        mapping = dict(image_key_view_map or {})
 
         unknown = sorted({view for view in mapping.values() if view not in _VIEW_TITLES})
         if unknown:

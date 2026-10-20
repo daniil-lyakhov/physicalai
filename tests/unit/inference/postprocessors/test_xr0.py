@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from typing import cast
+
 import numpy as np
 import pytest
 
@@ -22,7 +25,10 @@ class TestXR0PostprocessorInit:
     def test_flat_stats_raise(self) -> None:
         # Per-dimension stats are no longer broadcast over the chunk.
         with pytest.raises(ValueError, match="per-timestep"):
-            XR0Postprocessor(action_mean=[0.0] * 4, action_std=[1.0] * 4)
+            XR0Postprocessor(
+                action_mean=cast("Sequence[Sequence[float]]", [0.0] * 4),
+                action_std=cast("Sequence[Sequence[float]]", [1.0] * 4),
+            )
 
 
 class TestXR0PostprocessorCall:

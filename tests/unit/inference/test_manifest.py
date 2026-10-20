@@ -33,7 +33,8 @@ from physicalai.inference.manifest import (
     TensorSpec,
     _policy_name_from_class_path,
 )
-from physicalai.inference.preprocessors import StatsNormalizer
+from physicalai.inference.postprocessors import XR0Postprocessor
+from physicalai.inference.preprocessors import StatsNormalizer, XR0Preprocessor
 from physicalai.inference.runners import SinglePass
 
 
@@ -283,6 +284,7 @@ class TestInstantiateComponent:
             "state_std": [[2.0] * 8],
         })
         preprocessor = instantiate_component(Preprocessor, pre_spec)
+        assert isinstance(preprocessor, XR0Preprocessor)
         np.testing.assert_allclose(preprocessor._state_mean[:8], 1.0)
         np.testing.assert_allclose(preprocessor._state_std[:8], 2.0)
 
@@ -294,6 +296,7 @@ class TestInstantiateComponent:
             "action_dim": 6,
         })
         postprocessor = instantiate_component(Postprocessor, post_spec)
+        assert isinstance(postprocessor, XR0Postprocessor)
         assert postprocessor._mean.shape == (5, 8)
 
     def test_instantiate_xr0_with_image_key_view_map(self) -> None:
@@ -306,9 +309,10 @@ class TestInstantiateComponent:
             "max_state_dim": 32,
             "patch_size": 16,
             "merge_size": 2,
-            "image_key_view_map": {"top_camera": "ego", "pov_black_follower_camera": "wrist_left"},
+            "image_key_view_map": {"images.top_camera": "ego", "images.pov_black_follower_camera": "wrist_left"},
         })
         preprocessor = instantiate_component(Preprocessor, spec)
+        assert isinstance(preprocessor, XR0Preprocessor)
         assert preprocessor._image_key_view_map == {
             "images.top_camera": "ego",
             "images.pov_black_follower_camera": "wrist_left",

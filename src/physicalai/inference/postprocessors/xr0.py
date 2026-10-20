@@ -71,10 +71,7 @@ class XR0Postprocessor(Postprocessor):
         self._mean = np.asarray(action_mean, dtype=np.float32)
         self._std = np.asarray(action_std, dtype=np.float32)
         if self._mean.ndim != _STATS_NDIM:
-            msg = (
-                "action stats must be per-timestep with shape (chunk_size, max_action_dim), "
-                f"got {self._mean.shape}"
-            )
+            msg = f"action stats must be per-timestep with shape (chunk_size, max_action_dim), got {self._mean.shape}"
             raise ValueError(msg)
         if self._mean.shape != self._std.shape:
             msg = f"action_mean {self._mean.shape} and action_std {self._std.shape} must have the same shape"
