@@ -36,7 +36,6 @@ _TEMPORAL_IMAGE_NDIM = 5
 _BATCHED_IMAGE_NDIM = 4
 _CHANNELS_FIRST_NDIM = 3
 _TEMPORAL_STATE_NDIM = 3
-# Baked state stats are always per-timestep: (state_len, max_state_dim).
 _STATS_NDIM = 2
 
 # Reject images whose aspect ratio exceeds this (matches the source preprocessor).
